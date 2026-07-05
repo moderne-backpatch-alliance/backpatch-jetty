@@ -142,6 +142,21 @@ public class HttpParser
         CLOSED  // The associated stream/endpoint is at EOF
     }
 
+    // CVE-2026-2332: private sub-states of the public CHUNK_PARAMS state, driving
+    // RFC 9110/9112-strict chunk-extension parsing. Kept private (and the public
+    // State enum unchanged) so this stays a binary-compatible drop-in.
+    private enum ChunkExtState
+    {
+        EXT_BWS,
+        EXT_NAME_BWS_BEFORE,
+        EXT_NAME,
+        EXT_NAME_BWS_AFTER,
+        EXT_VALUE_BWS_BEFORE,
+        EXT_VALUE_OPEN_QUOTE,
+        EXT_VALUE,
+        EXT_VALUE_CLOSE_QUOTE
+    }
+
     private static final EnumSet<State> __idleStates = EnumSet.of(State.START, State.END, State.CLOSE, State.CLOSED);
     private static final EnumSet<State> __completeStates = EnumSet.of(State.END, State.CLOSE, State.CLOSED);
     private static final EnumSet<State> __terminatedStates = EnumSet.of(State.CLOSE, State.CLOSED);
@@ -177,6 +192,8 @@ public class HttpParser
     private long _contentPosition;
     private int _chunkLength;
     private int _chunkPosition;
+    private ChunkExtState _chunkExtState = ChunkExtState.EXT_BWS;
+    private boolean _chunkQuotedEscape;
     private boolean _headResponse;
     private boolean _cr;
     private ByteBuffer _contentChunk;
@@ -1777,10 +1794,6 @@ public class HttpParser
                                 setState(State.CHUNK);
                             break;
 
-                        case SPACE:
-                            setState(State.CHUNK_PARAMS);
-                            break;
-
                         default:
                             if (t.isHexDigit())
                             {
@@ -1788,34 +1801,152 @@ public class HttpParser
                                     throw new BadMessageException(HttpStatus.PAYLOAD_TOO_LARGE_413);
                                 _chunkLength = _chunkLength * 16 + t.getHexDigit();
                             }
-                            else
+                            else if (isBWS(t))
                             {
+                                // CVE-2026-2332: bad whitespace before ';' — enter strict extension parsing.
+                                _chunkExtState = ChunkExtState.EXT_BWS;
                                 setState(State.CHUNK_PARAMS);
                             }
+                            else if (t.getChar() == ';')
+                            {
+                                _chunkExtState = ChunkExtState.EXT_NAME_BWS_BEFORE;
+                                setState(State.CHUNK_PARAMS);
+                            }
+                            else
+                                throw new IllegalCharacterException(_state, t, buffer);
                     }
                     break;
                 }
 
                 case CHUNK_PARAMS:
                 {
+                    // CVE-2026-2332: RFC 9110/9112-strict chunk-extension parsing, ported from
+                    // jetty-12 ff9eb742. A quoted-string value must be well-formed — a raw
+                    // CR/LF/control inside an open quote is rejected rather than silently
+                    // terminating the extension (the request-smuggling desync vector). LF stays
+                    // tolerated as a chunk terminator in the non-quote states to preserve the
+                    // pre-existing 9.4.x acceptance of empty/whitespace extensions (e.g. "a;\r\n").
                     HttpTokens.Token t = next(buffer);
                     if (t == null)
                         break;
 
-                    switch (t.getType())
+                    boolean lf = t.getType() == HttpTokens.Type.LF;
+                    switch (_chunkExtState)
                     {
-                        case LF:
-                            if (_chunkLength == 0)
+                        case EXT_BWS:
+                            if (lf)
                             {
-                                setState(State.TRAILER);
-                                if (_handler.contentComplete())
+                                if (chunkExtEnd())
                                     return true;
                             }
-                            else
-                                setState(State.CHUNK);
+                            else if (t.getChar() == ';')
+                                _chunkExtState = ChunkExtState.EXT_NAME_BWS_BEFORE;
+                            else if (!isBWS(t))
+                                throw new IllegalCharacterException(_state, t, buffer);
                             break;
-                        default:
-                            break; // TODO review
+
+                        case EXT_NAME_BWS_BEFORE:
+                            if (lf)
+                            {
+                                if (chunkExtEnd())
+                                    return true;
+                            }
+                            else if (isTchar(t))
+                                _chunkExtState = ChunkExtState.EXT_NAME;
+                            else if (!isBWS(t))
+                                throw new IllegalCharacterException(_state, t, buffer);
+                            break;
+
+                        case EXT_NAME:
+                            if (lf)
+                            {
+                                if (chunkExtEnd())
+                                    return true;
+                            }
+                            else if (t.getChar() == ';')
+                                _chunkExtState = ChunkExtState.EXT_NAME_BWS_BEFORE;
+                            else if (isBWS(t))
+                                _chunkExtState = ChunkExtState.EXT_NAME_BWS_AFTER;
+                            else if (t.getChar() == '=')
+                                _chunkExtState = ChunkExtState.EXT_VALUE_BWS_BEFORE;
+                            else if (!isTchar(t))
+                                throw new IllegalCharacterException(_state, t, buffer);
+                            break;
+
+                        case EXT_NAME_BWS_AFTER:
+                            if (lf)
+                            {
+                                if (chunkExtEnd())
+                                    return true;
+                            }
+                            else if (t.getChar() == ';')
+                                _chunkExtState = ChunkExtState.EXT_NAME_BWS_BEFORE;
+                            else if (t.getChar() == '=')
+                                _chunkExtState = ChunkExtState.EXT_VALUE_BWS_BEFORE;
+                            else if (!isBWS(t))
+                                throw new IllegalCharacterException(_state, t, buffer);
+                            break;
+
+                        case EXT_VALUE_BWS_BEFORE:
+                            if (lf)
+                            {
+                                if (chunkExtEnd())
+                                    return true;
+                            }
+                            else if (t.getChar() == '"')
+                            {
+                                _chunkQuotedEscape = false;
+                                _chunkExtState = ChunkExtState.EXT_VALUE_OPEN_QUOTE;
+                            }
+                            else if (isTchar(t))
+                                _chunkExtState = ChunkExtState.EXT_VALUE;
+                            else if (!isBWS(t))
+                                throw new IllegalCharacterException(_state, t, buffer);
+                            break;
+
+                        case EXT_VALUE_OPEN_QUOTE:
+                            // Inside a quoted-string: a raw CR/LF/control is illegal here.
+                            if (_chunkQuotedEscape)
+                            {
+                                if (!isQuotedPair(t))
+                                    throw new IllegalCharacterException(_state, t, buffer);
+                                _chunkQuotedEscape = false;
+                            }
+                            else if (t.getChar() == '\\')
+                                _chunkQuotedEscape = true;
+                            else if (t.getChar() == '"')
+                                _chunkExtState = ChunkExtState.EXT_VALUE_CLOSE_QUOTE;
+                            else if (!isQdText(t))
+                                throw new IllegalCharacterException(_state, t, buffer);
+                            break;
+
+                        case EXT_VALUE:
+                            if (lf)
+                            {
+                                if (chunkExtEnd())
+                                    return true;
+                            }
+                            else if (isBWS(t))
+                                _chunkExtState = ChunkExtState.EXT_BWS;
+                            else if (t.getChar() == ';')
+                                _chunkExtState = ChunkExtState.EXT_NAME_BWS_BEFORE;
+                            else if (!isTchar(t))
+                                throw new IllegalCharacterException(_state, t, buffer);
+                            break;
+
+                        case EXT_VALUE_CLOSE_QUOTE:
+                            if (lf)
+                            {
+                                if (chunkExtEnd())
+                                    return true;
+                            }
+                            else if (isBWS(t))
+                                _chunkExtState = ChunkExtState.EXT_BWS;
+                            else if (t.getChar() == ';')
+                                _chunkExtState = ChunkExtState.EXT_NAME_BWS_BEFORE;
+                            else
+                                throw new IllegalCharacterException(_state, t, buffer);
+                            break;
                     }
                     break;
                 }
@@ -1857,6 +1988,74 @@ public class HttpParser
             remaining = buffer.remaining();
         }
         return false;
+    }
+
+    // CVE-2026-2332: reached LF terminating the chunk-size line; leave the extension parser
+    // and advance to the chunk body (or trailer for the last chunk), mirroring CHUNK_SIZE's LF.
+    private boolean chunkExtEnd()
+    {
+        _chunkExtState = ChunkExtState.EXT_BWS;
+        if (_chunkLength == 0)
+        {
+            setState(State.TRAILER);
+            return _handler.contentComplete();
+        }
+        setState(State.CHUNK);
+        return false;
+    }
+
+    // Bad whitespace, RFC 9110 [5.6.3].
+    private static boolean isBWS(HttpTokens.Token t)
+    {
+        return t.getType() == HttpTokens.Type.SPACE || t.getType() == HttpTokens.Type.HTAB;
+    }
+
+    // token / tchar, RFC 9110 [5.6.2].
+    private static boolean isTchar(HttpTokens.Token t)
+    {
+        switch (t.getType())
+        {
+            case TCHAR:
+            case DIGIT:
+            case ALPHA:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // qdtext, RFC 9110 [5.6.4].
+    private static boolean isQdText(HttpTokens.Token t)
+    {
+        switch (t.getType())
+        {
+            case HTAB:
+            case SPACE:
+            case OTEXT:
+                return true;
+            default:
+                char c = t.getChar();
+                return c == 0x21 || (c >= 0x23 && c <= 0x5B) || (c >= 0x5D && c <= 0x7E);
+        }
+    }
+
+    // quoted-pair, RFC 9110 [5.6.4].
+    private static boolean isQuotedPair(HttpTokens.Token t)
+    {
+        switch (t.getType())
+        {
+            case HTAB:
+            case SPACE:
+            case COLON:
+            case TCHAR:
+            case VCHAR:
+            case DIGIT:
+            case ALPHA:
+            case OTEXT:
+                return true;
+            default:
+                return false;
+        }
     }
 
     public boolean isAtEOF()
