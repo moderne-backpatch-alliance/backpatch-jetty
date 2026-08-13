@@ -2326,6 +2326,14 @@ public class Request implements HttpServletRequest
             if (config == null)
                 throw new IllegalStateException("No multipart config for servlet");
 
+            // Resolve the form-content limit the same way extractFormParameters() does on this
+            // baseline: a context value of -1 means "not configured", not "unlimited".
+            int maxFormContentSize = -1;
+            if (_context != null)
+                maxFormContentSize = _context.getContextHandler().getMaxFormContentSize();
+            if (maxFormContentSize < 0)
+                maxFormContentSize = lookupServerAttribute("org.eclipse.jetty.server.Request.maxFormContentSize", 200000);
+
             _multiPartInputStream = new MultiPartInputStreamParser(getInputStream(),
                                                              getContentType(), config,
                                                              (_context != null?(File)_context.getAttribute("javax.servlet.context.tempdir"):null));
@@ -2333,12 +2341,17 @@ public class Request implements HttpServletRequest
             setAttribute(__MULTIPART_INPUT_STREAM, _multiPartInputStream);
             setAttribute(__MULTIPART_CONTEXT, _context);
             Collection<Part> parts = _multiPartInputStream.getParts(); //causes parsing
+            long formContentSize = 0;
             ByteArrayOutputStream os = null;
             for (Part p:parts)
             {
                 MultiPartInputStreamParser.MultiPart mp = (MultiPartInputStreamParser.MultiPart)p;
                 if (mp.getContentDispositionFilename() == null)
                 {
+                    formContentSize = Math.addExact(formContentSize, p.getSize());
+                    if (maxFormContentSize >= 0 && formContentSize > maxFormContentSize)
+                        throw new IllegalStateException("Form is larger than max length " + maxFormContentSize);
+
                     // Servlet Spec 3.0 pg 23, parts without filename must be put into params.
                     String charset = null;
                     if (mp.getContentType() != null)
@@ -2360,6 +2373,16 @@ public class Request implements HttpServletRequest
         }
 
         return _multiPartInputStream.getParts();
+    }
+
+    private int lookupServerAttribute(String key, int dftValue)
+    {
+        Object attribute = _channel.getServer().getAttribute(key);
+        if (attribute instanceof Number)
+            return ((Number)attribute).intValue();
+        else if (attribute instanceof String)
+            return Integer.parseInt((String)attribute);
+        return dftValue;
     }
 
     /* ------------------------------------------------------------ */
