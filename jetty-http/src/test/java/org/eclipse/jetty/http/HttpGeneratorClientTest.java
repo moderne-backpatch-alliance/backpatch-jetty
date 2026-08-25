@@ -303,7 +303,7 @@ public class HttpGeneratorClientTest
                         if (hb.isState(AbstractGenerator.STATE_HEADER))
                         {
                             if (version<11)
-                                fields.addLongField("Content-Length",body.length());
+                                fields.putLongField("Content-Length",body.length());
                             hb.completeHeader(fields, Generator.MORE);
                         }
                         hb.flushBuffer();
