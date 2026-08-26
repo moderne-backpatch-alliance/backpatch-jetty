@@ -26,6 +26,7 @@ import org.eclipse.jetty.io.BufferCache.CachedBuffer;
 import org.eclipse.jetty.io.bio.StreamEndPoint;
 import org.eclipse.jetty.io.nio.ChannelEndPoint;
 import org.eclipse.jetty.util.StringUtil;
+import org.eclipse.jetty.util.TypeUtil;
 import org.eclipse.jetty.util.log.Log;
 
 public class HttpParser implements Parser
@@ -53,6 +54,8 @@ public class HttpParser implements Parser
     public static final int STATE_CHUNK_PARAMS=5;
     public static final int STATE_CHUNK=6;
 
+    private final static int MAX_CHUNK_LENGTH=Integer.MAX_VALUE/16-16;
+
     private final EventHandler _handler;
     private final Buffers _buffers; // source of buffers
     private final EndPoint _endp;
@@ -71,6 +74,7 @@ public class HttpParser implements Parser
     protected int _state=STATE_START;
     protected byte _eol;
     protected int _length;
+    private boolean _hasContentLength;
     protected long _contentLength;
     protected long _contentPosition;
     protected int _chunkLength;
@@ -343,6 +347,7 @@ public class HttpParser implements Parser
             {
                 case STATE_START:
                     _contentLength=HttpTokens.UNKNOWN_CONTENT;
+                    _hasContentLength=false;
                     _cached=null;
                     if (ch > HttpTokens.SPACE || ch<0)
                     {
@@ -505,20 +510,25 @@ public class HttpParser implements Parser
                                     switch (ho)
                                     {
                                         case HttpHeaders.CONTENT_LENGTH_ORDINAL:
-                                            if (_contentLength != HttpTokens.CHUNKED_CONTENT)
+                                            if (_hasContentLength)
+                                                throw new HttpException(HttpStatus.BAD_REQUEST_400);
+                                            _hasContentLength=true;
+
+                                            if (_contentLength == HttpTokens.CHUNKED_CONTENT)
+                                                throw new HttpException(HttpStatus.BAD_REQUEST_400);
+
+                                            try
                                             {
-                                                try
-                                                {
-                                                    _contentLength=BufferUtil.toLong(value);
-                                                }
-                                                catch(NumberFormatException e)
-                                                {
-                                                    Log.ignore(e);
-                                                    throw new HttpException(HttpStatus.BAD_REQUEST_400);
-                                                }
-                                                if (_contentLength <= 0)
-                                                    _contentLength=HttpTokens.NO_CONTENT;
+                                                _contentLength=BufferUtil.toLong(value);
                                             }
+                                            catch(NumberFormatException e)
+                                            {
+                                                Log.ignore(e);
+                                                throw new HttpException(HttpStatus.BAD_REQUEST_400);
+                                            }
+                                            if (_contentLength <= 0)
+                                                _contentLength=HttpTokens.NO_CONTENT;
+
                                             break;
                                             
                                         case HttpHeaders.TRANSFER_ENCODING_ORDINAL:
@@ -535,6 +545,10 @@ public class HttpParser implements Parser
                                                 else if (c.indexOf(HttpHeaderValues.CHUNKED) >= 0)
                                                     throw new HttpException(400,null);
                                             }
+
+                                            if (_hasContentLength && _contentLength==HttpTokens.CHUNKED_CONTENT)
+                                                throw new HttpException(HttpStatus.BAD_REQUEST_400);
+
                                             break;
                                     }
                                 }
@@ -851,12 +865,12 @@ public class HttpParser implements Parser
                     }
                     else if (ch <= HttpTokens.SPACE || ch == HttpTokens.SEMI_COLON)
                         _state=STATE_CHUNK_PARAMS;
-                    else if (ch >= '0' && ch <= '9')
-                        _chunkLength=_chunkLength * 16 + (ch - '0');
-                    else if (ch >= 'a' && ch <= 'f')
-                        _chunkLength=_chunkLength * 16 + (10 + ch - 'a');
-                    else if (ch >= 'A' && ch <= 'F')
-                        _chunkLength=_chunkLength * 16 + (10 + ch - 'A');
+                    else if (ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f' || ch >= 'A' && ch <= 'F')
+                    {
+                        if (_chunkLength>MAX_CHUNK_LENGTH)
+                            throw new HttpException(HttpStatus.REQUEST_ENTITY_TOO_LARGE_413);
+                        _chunkLength=_chunkLength * 16 + TypeUtil.convertHexDigit(ch);
+                    }
                     else
                         throw new IOException("bad chunk char: " + ch);
                     break;
@@ -992,6 +1006,7 @@ public class HttpParser implements Parser
 
         _state=STATE_START;
         _contentLength=HttpTokens.UNKNOWN_CONTENT;
+        _hasContentLength=false;
         _contentPosition=0;
         _length=0;
         _responseStatus=0;
@@ -1054,6 +1069,7 @@ public class HttpParser implements Parser
     {
         this._state=state;
         _contentLength=HttpTokens.UNKNOWN_CONTENT;
+        _hasContentLength=false;
     }
 
     /* ------------------------------------------------------------------------------- */
