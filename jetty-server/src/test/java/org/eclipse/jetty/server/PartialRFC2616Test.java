@@ -277,8 +277,8 @@ public class PartialRFC2616Test
     @Test
     public void test4_4_3() throws Exception
     {
-        // _content length is ignored, as chunking is used. If it is
-        // not ignored, the second request wont be seen.
+        // Due to smuggling concerns, handling has been changed to
+        // treat content length and chunking as a bad request.
         int offset=0;
         String response = connector.getResponses(
                 "GET /R1 HTTP/1.1\n" +
@@ -301,12 +301,8 @@ public class PartialRFC2616Test
                         "Content-Length: 6\n" +
                         "\n" +
                         "abcdef");
-        offset=checkContains(response,offset,"HTTP/1.1 200 OK","3. ignore c-l")+1;
-        offset=checkContains(response,offset,"/R1","3. ignore c-l")+1;
-        offset=checkContains(response,offset,"123456","3. ignore c-l")+1;
-        offset=checkContains(response,offset,"HTTP/1.1 200 OK","3. ignore c-l")+1;
-        offset=checkContains(response,offset,"/R2","3. _content-length")+1;
-        offset=checkContains(response,offset,"abcdef","3. _content-length")+1;
+        offset=checkContains(response,offset,"HTTP/1.1 400 Bad","3. ignore c-l")+1;
+        checkNotContained(response,offset,"/R2","3. _content-length");
     }
 
     @Test

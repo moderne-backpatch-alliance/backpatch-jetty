@@ -76,6 +76,7 @@ public class HttpParser
     public static final Logger LOG = Log.getLogger(HttpParser.class);
     public final static boolean __STRICT=Boolean.getBoolean("org.eclipse.jetty.http.HttpParser.STRICT"); 
     public final static int INITIAL_URI_LENGTH=256;
+    private final static int MAX_CHUNK_LENGTH=Integer.MAX_VALUE/16-16;
 
     // States
     public enum State
@@ -125,6 +126,7 @@ public class HttpParser
     private HttpVersion _version;
     private ByteBuffer _uri=ByteBuffer.allocate(INITIAL_URI_LENGTH); // Tune?
     private EndOfContent _endOfContent;
+    private boolean _hasContentLength;
     private long _contentLength;
     private long _contentPosition;
     private int _chunkLength;
@@ -600,6 +602,9 @@ public class HttpParser
                                 HttpVersion version=HttpVersion.lookAheadGet(buffer.array(),buffer.arrayOffset()+buffer.position()-1,buffer.arrayOffset()+buffer.limit());
                                 if (version!=null) 
                                 {
+                                    if (version!=HttpVersion.HTTP_1_0 && version!=HttpVersion.HTTP_1_1)
+                                        throw new BadMessage(HttpStatus.BAD_REQUEST_400,"Bad Version");
+
                                     int pos = buffer.position()+version.asString().length()-1;
                                     if (pos<buffer.limit())
                                     {
@@ -656,9 +661,11 @@ public class HttpParser
                         {
                             throw new BadMessage(HttpStatus.BAD_REQUEST_400,"Unknown Version");
                         }
+                        if (_version!=HttpVersion.HTTP_1_0 && _version!=HttpVersion.HTTP_1_1)
+                            throw new BadMessage(HttpStatus.BAD_REQUEST_400,"Bad Version");
                         
                         // Should we try to cache header fields?
-                        if (_connectionFields==null && _version.getVersion()>=HttpVersion.HTTP_1_1.getVersion())
+                        if (_connectionFields==null && _version.getVersion()==HttpVersion.HTTP_1_1.getVersion())
                         {
                             int header_cache = _handler.getHeaderCacheSize();
                             if (header_cache>0)
@@ -711,22 +718,27 @@ public class HttpParser
         switch (_header)
         {
             case CONTENT_LENGTH:
-                if (_endOfContent != EndOfContent.CHUNKED_CONTENT)
+                if (_hasContentLength)
+                    throw new BadMessage(HttpStatus.BAD_REQUEST_400,"Bad Content-Lengths");
+                _hasContentLength = true;
+
+                if (_endOfContent == EndOfContent.CHUNKED_CONTENT)
+                    throw new BadMessage(HttpStatus.BAD_REQUEST_400,"Bad Content-Length");
+
+                try
                 {
-                    try
-                    {
-                        _contentLength=Long.parseLong(_valueString);
-                    }
-                    catch(NumberFormatException e)
-                    {
-                        LOG.ignore(e);
-                        throw new BadMessage(HttpStatus.BAD_REQUEST_400,"Bad Content-Length");
-                    }
-                    if (_contentLength <= 0)
-                        _endOfContent=EndOfContent.NO_CONTENT;
-                    else
-                        _endOfContent=EndOfContent.CONTENT_LENGTH;
+                    _contentLength=Long.parseLong(_valueString);
                 }
+                catch(NumberFormatException e)
+                {
+                    LOG.ignore(e);
+                    throw new BadMessage(HttpStatus.BAD_REQUEST_400,"Bad Content-Length");
+                }
+                if (_contentLength <= 0)
+                    _endOfContent=EndOfContent.NO_CONTENT;
+                else
+                    _endOfContent=EndOfContent.CONTENT_LENGTH;
+                
                 break;
 
             case TRANSFER_ENCODING:
@@ -741,6 +753,10 @@ public class HttpParser
                         throw new BadMessage(HttpStatus.BAD_REQUEST_400,"Bad chunking");
                     }
                 }
+                
+                if (_hasContentLength && _endOfContent==EndOfContent.CHUNKED_CONTENT)
+                    throw new BadMessage(HttpStatus.BAD_REQUEST_400,"Bad chunking");
+
                 break;
 
             case HOST:
@@ -1283,9 +1299,15 @@ public class HttpParser
                                 setState(State.CHUNK);
                         }
                         else if (ch <= HttpTokens.SPACE || ch == HttpTokens.SEMI_COLON)
+                        {
                             setState(State.CHUNK_PARAMS);
-                        else 
+                        }
+                        else
+                        {
+                            if (_chunkLength>MAX_CHUNK_LENGTH)
+                                throw new BadMessage(HttpStatus.REQUEST_ENTITY_TOO_LARGE_413);
                             _chunkLength=_chunkLength * 16 + TypeUtil.convertHexDigit(ch);
+                        }
                         break;
                     }
 
@@ -1458,6 +1480,7 @@ public class HttpParser
         setState(State.START);
         _endOfContent=EndOfContent.UNKNOWN_CONTENT;
         _contentLength=-1;
+        _hasContentLength=false;
         _contentPosition=0;
         _responseStatus=0;
         _contentChunk=null;
