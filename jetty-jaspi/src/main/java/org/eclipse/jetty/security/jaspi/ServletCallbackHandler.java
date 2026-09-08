@@ -136,4 +136,10 @@ public class ServletCallbackHandler implements CallbackHandler
         _groupPrincipals.set(null);
         return groupPrincipalCallback;
     }
+
+    public void clear()
+    {
+        _callerPrincipals.remove();
+        _groupPrincipals.remove();
+    }
 }
