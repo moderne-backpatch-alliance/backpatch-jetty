@@ -145,8 +145,21 @@ public class JaspiAuthenticator extends LoginAuthenticator
             String authContextId = _authConfig.getAuthContextID(messageInfo);
             ServerAuthContext authContext = _authConfig.getAuthContext(authContextId, _serviceSubject, _authProperties);
             Subject clientSubject = new Subject();
+            AuthStatus authStatus;
+            CallerPrincipalCallback principalCallback;
+            GroupPrincipalCallback groupPrincipalCallback;
 
-            AuthStatus authStatus = authContext.validateRequest(messageInfo, clientSubject, _serviceSubject);
+            try
+            {
+                _callbackHandler.clear();
+                authStatus = authContext.validateRequest(messageInfo, clientSubject, _serviceSubject);
+                principalCallback = _callbackHandler.getThreadCallerPrincipalCallback();
+                groupPrincipalCallback = _callbackHandler.getThreadGroupPrincipalCallback();
+            }
+            finally
+            {
+                _callbackHandler.clear();
+            }
 
             if (authStatus == AuthStatus.SEND_CONTINUE)
                 return Authentication.SEND_CONTINUE;
@@ -157,13 +170,12 @@ public class JaspiAuthenticator extends LoginAuthenticator
             {
                 Set<UserIdentity> ids = clientSubject.getPrivateCredentials(UserIdentity.class);
                 UserIdentity userIdentity;
-                if (ids.size() > 0)
+                if (!ids.isEmpty())
                 {
                     userIdentity = ids.iterator().next();
                 }
                 else
                 {
-                    CallerPrincipalCallback principalCallback = _callbackHandler.getThreadCallerPrincipalCallback();
                     if (principalCallback == null)
                     {
                         return Authentication.UNAUTHENTICATED;
@@ -186,7 +198,6 @@ public class JaspiAuthenticator extends LoginAuthenticator
                             return Authentication.UNAUTHENTICATED;
                         }
                     }
-                    GroupPrincipalCallback groupPrincipalCallback = _callbackHandler.getThreadGroupPrincipalCallback();
                     String[] groups = groupPrincipalCallback == null ? null : groupPrincipalCallback.getGroups();
                     userIdentity = _identityService.newUserIdentity(clientSubject, principal, groups);
                 }
