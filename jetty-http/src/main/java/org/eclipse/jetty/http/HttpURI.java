@@ -191,6 +191,36 @@ public class HttpURI
         return c < __unreservedPctEncodedSubDelims.length && __unreservedPctEncodedSubDelims[c];
     }
 
+    /**
+     * Validate the scheme.
+     *
+     * @param scheme The scheme to validate
+     * @return The scheme, unchanged
+     * @throws IllegalArgumentException If the scheme is not valid
+     */
+    private static String validateScheme(String scheme)
+    {
+        if (scheme == null || scheme.isEmpty())
+            throw new IllegalArgumentException("Bad scheme");
+
+        //  scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+        for (int i = 0; i < scheme.length(); i++)
+        {
+            char c = scheme.charAt(i);
+            if (c >= 'A' && c <= 'Z' ||
+                c >= 'a' && c <= 'z' ||
+                (i > 0 && (c >= '0' && c <= '9' ||
+                    c == '.' ||
+                    c == '+' ||
+                    c == '-')))
+                continue;
+
+            throw new IllegalArgumentException("Bad scheme");
+        }
+
+        return scheme;
+    }
+
     static
     {
         // Establish allowed and disallowed characters per the path rules of
@@ -471,6 +501,8 @@ public class HttpURI
                             pathMark = segment = i;
                             state = State.PATH;
                             break;
+                        case ':':
+                            throw new IllegalArgumentException("Bad Scheme");
                         default:
                             mark = i;
                             if (_scheme == null)
@@ -491,7 +523,7 @@ public class HttpURI
                     {
                         case ':':
                             // must have been a scheme
-                            _scheme = uri.substring(mark, i);
+                            _scheme = validateScheme(uri.substring(mark, i));
                             // Start again with scheme set
                             state = State.START;
                             break;
