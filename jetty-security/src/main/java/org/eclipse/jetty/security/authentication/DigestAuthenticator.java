@@ -19,11 +19,11 @@
 package org.eclipse.jetty.security.authentication;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.BitSet;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,6 +48,8 @@ import org.eclipse.jetty.util.log.Log;
 import org.eclipse.jetty.util.log.Logger;
 import org.eclipse.jetty.util.security.Constraint;
 import org.eclipse.jetty.util.security.Credential;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * The nonce max age in ms can be set with the {@link SecurityHandler#setInitParameter(String, String)}
@@ -200,6 +202,7 @@ public class DigestAuthenticator extends LoginAuthenticator
                     "\", nonce=\"" + newNonce(baseRequest) +
                     "\", algorithm=MD5" +
                     ", qop=\"auth\"" +
+                    ", charset=UTF-8" +
                     ", stale=" + stale);
                 response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
 
@@ -344,43 +347,23 @@ public class DigestAuthenticator extends LoginAuthenticator
                 }
                 else
                 {
-                    // calc A1 digest
-                    md.update(username.getBytes(StandardCharsets.ISO_8859_1));
-                    md.update((byte)':');
-                    md.update(realm.getBytes(StandardCharsets.ISO_8859_1));
-                    md.update((byte)':');
-                    md.update(password.getBytes(StandardCharsets.ISO_8859_1));
-                    ha1 = md.digest();
+                    // Calculate H(A1).
+                    String a1 = username + ":" + realm + ":" + password;
+                    ha1 = md.digest(a1.getBytes(UTF_8));
                 }
-                // calc A2 digest
-                md.reset();
-                md.update(method.getBytes(StandardCharsets.ISO_8859_1));
-                md.update((byte)':');
-                md.update(uri.getBytes(StandardCharsets.ISO_8859_1));
-                byte[] ha2 = md.digest();
 
-                // calc digest
-                // request-digest = <"> < KD ( H(A1), unq(nonce-value) ":"
-                // nc-value ":" unq(cnonce-value) ":" unq(qop-value) ":" H(A2) )
-                // <">
-                // request-digest = <"> < KD ( H(A1), unq(nonce-value) ":" H(A2)
-                // ) > <">
+                // Calculate H(A2).
+                String a2 = method + ":" + uri;
+                byte[] ha2 = md.digest(a2.getBytes(UTF_8));
 
-                md.update(TypeUtil.toString(ha1, 16).getBytes(StandardCharsets.ISO_8859_1));
-                md.update((byte)':');
-                md.update(nonce.getBytes(StandardCharsets.ISO_8859_1));
-                md.update((byte)':');
-                md.update(nc.getBytes(StandardCharsets.ISO_8859_1));
-                md.update((byte)':');
-                md.update(cnonce.getBytes(StandardCharsets.ISO_8859_1));
-                md.update((byte)':');
-                md.update(qop.getBytes(StandardCharsets.ISO_8859_1));
-                md.update((byte)':');
-                md.update(TypeUtil.toString(ha2, 16).getBytes(StandardCharsets.ISO_8859_1));
-                byte[] digest = md.digest();
+                // Calculate response, must match what the client sent.
+                String expected = TypeUtil.toString(ha1, 16) + ":" +
+                    nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" +
+                    TypeUtil.toString(ha2, 16);
+                expected = TypeUtil.toString(md.digest(expected.getBytes(UTF_8)), 16);
 
-                // check digest
-                return stringEquals(TypeUtil.toString(digest, 16).toLowerCase(), response == null ? null : response.toLowerCase());
+                // Check digest.
+                return stringEquals(expected, response == null ? null : response.toLowerCase(Locale.ROOT));
             }
             catch (Exception e)
             {
